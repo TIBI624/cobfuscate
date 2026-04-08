@@ -1,7 +1,7 @@
 try:
-    from .obfuscate import obfuscate_string, obfuscate_code
+    from .obfuscate import obfuscate_string_b64
 except ImportError:
-    obfuscate_string = None
-    obfuscate_code = None
+    # This allows the Python part to gracefully handle the C module not being built.
+    obfuscate_string_b64 = None
 
-__all__ = ["obfuscate_string", "obfuscate_code"]
+__all__ = ["obfuscate_string_b64"]

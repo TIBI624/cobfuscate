@@ -28,7 +28,7 @@ def main(input_path, output_path):
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1)
     except Exception as e:
-        click.echo(f"Unexpected error: {e}", err=True)
+        click.echo(f"An unexpected error occurred: {e}", err=True)
         raise SystemExit(1)
 
 

@@ -3,23 +3,25 @@
 
 #include <Python.h>
 
-PyObject* obfuscate_string(PyObject* self, PyObject* args);
-PyObject* obfuscate_code(PyObject* self, PyObject* args);
+// Function Prototypes
+PyObject* obfuscate_string_b64(PyObject* self, PyObject* args);
 
+// Method Definitions
 static PyMethodDef ObfuscateMethods[] = {
-    {"obfuscate_string", obfuscate_string, METH_VARARGS, "Obfuscate a string"},
-    {"obfuscate_code", obfuscate_code, METH_VARARGS, "Obfuscate Python code"},
-    {NULL, NULL, 0, NULL}
+    {"obfuscate_string_b64", obfuscate_string_b64, METH_VARARGS, "Obfuscate a string with multi-byte XOR and return as Base64."},
+    {NULL, NULL, 0, NULL} // Sentinel
 };
 
+// Module Definition
 static struct PyModuleDef obfuscatemodule = {
     PyModuleDef_HEAD_INIT,
     "obfuscate",
-    "CObfuscate C Backend",
+    "CObfuscate C Backend for high-performance obfuscation tasks.",
     -1,
     ObfuscateMethods
 };
 
+// Module Initializer
 PyMODINIT_FUNC PyInit_obfuscate(void);
 
-#endif
+#endif //COBFUSCATE_OBFUSCATE_H
