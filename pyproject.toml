@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cobfuscate"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python code obfuscator with C backend support"
 readme = "README.md"
 license = "MIT"

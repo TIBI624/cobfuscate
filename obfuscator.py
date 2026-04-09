@@ -2,39 +2,38 @@
 Core obfuscation logic for CObfuscate.
 Includes:
 - Scope-aware identifier renaming
-- String literal obfuscation via C backend
+- Safe import aliasing for built-in/external modules
+- Self-obfuscating string literal decoder
 - Control flow flattening
 - Docstring removal
 """
 
 import os
 import random
+import builtins
 import libcst as cst
 from pathlib import Path
 from collections import defaultdict
 
-# CORRECTED: Import from the 'ext' package as defined in pyproject.toml
 try:
     from .ext.obfuscate import obfuscate_string_b64
 except ImportError:
-    # This will be printed if the C extension is not compiled
     obfuscate_string_b64 = None
 
 HEADER_COMMENT = "# Obfuscated with CObfuscate\n"
+
+# The decoder is written as normal Python code. 
+# The RenameTransformer and ControlFlowFlattener will chew it up into an unreadable mess!
 DECODER_FUNC_NAME = "_d"
 DECODER_CODE = f"""
 import base64
 def {DECODER_FUNC_NAME}(e, k):
-    b=base64.b64decode(e)
-    k_len=len(k)
-    return "".join([chr(b[i]^k[i%k_len]) for i in range(len(b))])
+    b = base64.b64decode(e)
+    return "".join(chr(b[i] ^ k[i % len(k)]) for i in range(len(b)))
 """
 
 def _random_mangled_name() -> str:
-    """
-    Generates a visually confusing but valid identifier.
-    Guarantees the first character is a letter to avoid 'invalid identifier' errors.
-    """
+    """Generates a visually confusing but valid identifier."""
     prefix = "O"
     suffix = "".join(random.choice("O0") for _ in range(random.randint(5, 10)))
     return prefix + suffix
@@ -42,32 +41,113 @@ def _random_mangled_name() -> str:
 class RenameTransformer(cst.CSTTransformer):
     """
     Performs scope-aware renaming of variables, functions, and classes.
+    Safely handles imports by aliasing them, and protects attributes/builtins.
     """
     def __init__(self):
         super().__init__()
         self.name_map = defaultdict(dict)
         self.scope_stack = ["global"]
+        self.skip_names = set()
+        self.import_map = {}  # Maps original import names to their new obfuscated aliases
+        self.builtins = set(dir(builtins))
+        self.inside_import = False  # Strict flag to prevent renaming inside import statements
 
     def _get_new_name(self, name: str) -> str:
         current_scope = self.scope_stack[-1]
         if name not in self.name_map[current_scope]:
             if name.startswith("__"):
-                return name
+                return name  # Protect dunders
             new_name = _random_mangled_name()
             while new_name in self.name_map[current_scope].values():
                 new_name = _random_mangled_name()
             self.name_map[current_scope][name] = new_name
         return self.name_map[current_scope][name]
 
+    def _alias_imports(self, names):
+        """Helper to obfuscate import names by adding aliases."""
+        new_names = []
+        for import_alias in names:
+            name_node = import_alias.name
+            
+            # Only safely alias simple names (e.g., 'import asyncio')
+            # Skip complex imports like 'import os.path' to avoid breaking attribute access
+            if not isinstance(name_node, cst.Name):
+                new_names.append(import_alias)
+                continue
+                
+            orig_name = name_node.value
+            if orig_name == "*":
+                new_names.append(import_alias)
+                continue
+            
+            # If it already has an alias (e.g., import X as Y), rename Y
+            if import_alias.asname:
+                new_alias_name = self._get_new_name(import_alias.asname.name.value)
+                self.import_map[new_alias_name] = new_alias_name 
+            else:
+                # Prevent duplicate aliases if the user imports the same module twice
+                if orig_name in self.import_map:
+                    new_alias_name = self.import_map[orig_name]
+                else:
+                    # Create a new alias for the module (e.g., import asyncio -> import asyncio as O0O0O)
+                    new_alias_name = _random_mangled_name()
+                    self.import_map[orig_name] = new_alias_name
+            
+            new_names.append(
+                import_alias.with_changes(
+                    asname=cst.AsName(name=cst.Name(new_alias_name))
+                )
+            )
+        return new_names
+
+    # --- Import Handlers ---
+    def visit_Import(self, node: cst.Import) -> bool:
+        self.inside_import = True
+        return True
+
+    def leave_Import(self, original_node: cst.Import, updated_node: cst.Import) -> cst.Import:
+        self.inside_import = False
+        new_names = self._alias_imports(updated_node.names)
+        return updated_node.with_changes(names=new_names)
+
+    def visit_ImportFrom(self, node: cst.ImportFrom) -> bool:
+        self.inside_import = True
+        return True
+
+    def leave_ImportFrom(self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom) -> cst.ImportFrom:
+        self.inside_import = False
+        new_names = self._alias_imports(updated_node.names)
+        return updated_node.with_changes(names=new_names)
+
+    # --- Protection Handlers ---
+    def visit_Arg(self, node: cst.Arg) -> bool:
+        """Protect keyword arguments in function calls (e.g., 'headers' in get(headers=X))"""
+        if node.keyword is not None:
+            self.skip_names.add(id(node.keyword))
+        return True
+
+    def visit_Attribute(self, node: cst.Attribute) -> bool:
+        """Protect object attributes (e.g., 'version' in sys.version)"""
+        if isinstance(node.attr, cst.Name):
+            self.skip_names.add(id(node.attr))
+        return True
+
+    def leave_Attribute(self, original_node: cst.Attribute, updated_node: cst.Attribute) -> cst.BaseExpression:
+        """Rename the object IF it's an imported module (e.g., asyncio.sleep -> O0O0.sleep)"""
+        if isinstance(updated_node.value, cst.Name):
+            orig_val = updated_node.value.value
+            if orig_val in self.import_map:
+                return updated_node.with_changes(value=cst.Name(self.import_map[orig_val]))
+        return updated_node
+
+    # --- Scope Handlers ---
     def visit_FunctionDef(self, node: cst.FunctionDef) -> bool:
         self.scope_stack.append(node.name.value)
         for param in node.params.params:
             self._get_new_name(param.name.value)
         return True
 
-    def leave_FunctionDef(
-        self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
-    ) -> cst.FunctionDef:
+    def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
         scope_name = self.scope_stack.pop()
         new_name_str = self._get_new_name(original_node.name.value)
         new_name = cst.Name(new_name_str)
@@ -84,35 +164,49 @@ class RenameTransformer(cst.CSTTransformer):
         self.scope_stack.append(node.name.value)
         return True
 
-    def leave_ClassDef(
-        self, original_node: cst.ClassDef, updated_node: cst.ClassDef
-    ) -> cst.ClassDef:
+    def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
         self.scope_stack.pop()
         new_name_str = self._get_new_name(original_node.name.value)
         return updated_node.with_changes(name=cst.Name(new_name_str))
 
-    def leave_Assign(
-        self, original_node: cst.Assign, updated_node: cst.Assign
-    ) -> cst.Assign:
+    def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
         new_targets = []
         for target in updated_node.targets:
             if isinstance(target.target, cst.Name):
                 new_name_str = self._get_new_name(target.target.value)
-                new_targets.append(
-                    target.with_changes(target=cst.Name(new_name_str))
-                )
+                new_targets.append(target.with_changes(target=cst.Name(new_name_str)))
             else:
                 new_targets.append(target)
         return updated_node.with_changes(targets=new_targets)
 
     def leave_Name(self, original_node: cst.Name, updated_node: cst.Name) -> cst.BaseExpression:
+        # 1. Skip if explicitly protected (like keywords/attributes)
+        if id(original_node) in self.skip_names:
+            return updated_node
+        
+        # 2. CRITICAL FIX: Do not rename anything inside an import statement
+        if self.inside_import:
+            return updated_node
+            
+        val = original_node.value
+        
+        # 3. Skip Python built-ins (print, len, True, None, exec, etc.)
+        if val in self.builtins:
+            return updated_node
+            
+        # 4. If it's an imported module/function, use its obfuscated alias
+        if val in self.import_map:
+            return cst.Name(self.import_map[val])
+        
+        # 5. Otherwise, apply standard scope-aware variable renaming
         for scope in reversed(self.scope_stack):
-            if original_node.value in self.name_map[scope]:
-                return updated_node.with_changes(value=self.name_map[scope][original_node.value])
+            if val in self.name_map[scope]:
+                return updated_node.with_changes(value=self.name_map[scope][val])
+                
         return updated_node
 
 class StringTransformer(cst.CSTTransformer):
-    """Obfuscates string literals using the C backend and injects a decoder."""
+    """Obfuscates string literals using the C backend and injects a decoder to be flattened."""
     def leave_SimpleString(self, original_node: cst.SimpleString, updated_node: cst.SimpleString) -> cst.BaseExpression:
         if not obfuscate_string_b64:
             return updated_node
@@ -130,8 +224,10 @@ class StringTransformer(cst.CSTTransformer):
 
     def leave_Module(self, original_node: cst.Module, updated_node: cst.Module) -> cst.Module:
         if obfuscate_string_b64:
-            decoder_node = cst.parse_module(DECODER_CODE)
-            return updated_node.with_changes(body=[*decoder_node.body, *updated_node.body])
+            # Parse the decoder and prepend it. 
+            # RenameTransformer and ControlFlowFlattener will turn it into unreadable spaghetti!
+            decoder_module = cst.parse_module(DECODER_CODE)
+            return updated_node.with_changes(body=[*decoder_module.body, *updated_node.body])
         return updated_node
 
 class DocstringRemover(cst.CSTTransformer):
@@ -169,14 +265,12 @@ class ControlFlowFlattener(cst.CSTTransformer):
         for new_idx, old_idx in enumerate(indices):
             stmt = body_stmts[old_idx]
             
-            # Find the new shuffled index of the next statement in the original sequence
-            # If this is the last statement, the next state is -1 (exit condition)
             next_state = -1
             try:
                 next_original_idx = old_idx + 1
                 next_state = indices.index(next_original_idx)
             except ValueError:
-                pass # next_state remains -1
+                pass
 
             case_body = [
                 stmt,
@@ -188,43 +282,30 @@ class ControlFlowFlattener(cst.CSTTransformer):
             )
             dispatcher_cases.append(if_case)
 
-        # Chain the If nodes together into a single if/elif/else block
         if len(dispatcher_cases) > 1:
             for i in range(len(dispatcher_cases) - 1, 0, -1):
                 dispatcher_cases[i-1] = dispatcher_cases[i-1].with_changes(
                     orelse=cst.Else(body=cst.IndentedBlock(body=[dispatcher_cases[i]]))
                 )
         
-        # --- START OF BUG FIX ---
-        # The original code was missing everything from here until the return statement.
-        # It tried to use 'new_func_body' without ever defining it.
-
-        # The root of our if/elif/else dispatcher chain
         dispatcher_root = dispatcher_cases[0]
 
-        # The body of the main while loop
         loop_body = [
             dispatcher_root,
-            # Add a final check to break the loop when state is -1
             cst.If(
                 test=cst.parse_expression(f"{state_var_name} == -1"),
                 body=cst.IndentedBlock(body=[cst.SimpleStatementLine(body=[cst.Break()])])
             )
         ]
 
-        # Define the complete new function body, which was missing before
         new_func_body = [
-            # 1. Initialize the state variable to start at the beginning of the original code
             cst.parse_statement(f"{state_var_name} = {indices.index(0)}"),
-            # 2. Create the while loop that contains the dispatcher
             cst.While(
                 test=cst.Name("True"),
                 body=cst.IndentedBlock(body=loop_body)
             )
         ]
-        # --- END OF BUG FIX ---
         
-        # Replace the function's body with the newly constructed flattened flow
         return updated_node.with_changes(body=cst.IndentedBlock(body=new_func_body))
 
 def obfuscate_code(source: str) -> str:
@@ -243,7 +324,6 @@ def obfuscate_code(source: str) -> str:
 
         return HEADER_COMMENT + tree.code
     except Exception as e:
-        # This is where your error message came from
         return f"# OBFUSCATION FAILED: {e}\n" + source
 
 def obfuscate_file(input_file: str, output_file: str) -> None:
