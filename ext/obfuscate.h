@@ -3,25 +3,20 @@
 
 #include <Python.h>
 
-// Function Prototypes
+// Function prototypes
 PyObject* obfuscate_string_b64(PyObject* self, PyObject* args);
 
-// Method Definitions
+// Method definitions
 static PyMethodDef ObfuscateMethods[] = {
-    {"obfuscate_string_b64", obfuscate_string_b64, METH_VARARGS, "Obfuscate a string with multi-byte XOR and return as Base64."},
-    {NULL, NULL, 0, NULL} // Sentinel
+    {"obfuscate_string_b64", obfuscate_string_b64, METH_VARARGS,
+     "Obfuscate a string with multi-byte XOR and return as Base64."},
+    {NULL, NULL, 0, NULL}
 };
 
-// Module Definition
-static struct PyModuleDef obfuscatemodule = {
-    PyModuleDef_HEAD_INIT,
-    "obfuscate",
-    "CObfuscate C Backend for high-performance obfuscation tasks.",
-    -1,
-    ObfuscateMethods
-};
+// Module definition – must be non-static, defined in obfuscate.c
+extern struct PyModuleDef obfuscatemodule;
 
-// Module Initializer
+// Module initializer
 PyMODINIT_FUNC PyInit_obfuscate(void);
 
-#endif //COBFUSCATE_OBFUSCATE_H
+#endif // COBFUSCATE_OBFUSCATE_H

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cobfuscate"
-version = "0.3.0"
+version = "0.4.0"
 description = "Python code obfuscator with C backend support"
 readme = "README.md"
 license = "MIT"
@@ -36,3 +36,4 @@ cobfuscate = ["*.py"]
 [[tool.setuptools.ext-modules]]
 name = "cobfuscate.ext.obfuscate"
 sources = ["cobfuscate/ext/obfuscate.c"]
+include-dirs = ["cobfuscate/ext"]
